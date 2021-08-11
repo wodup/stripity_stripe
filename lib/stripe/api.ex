@@ -427,6 +427,8 @@ defmodule Stripe.API do
   @spec retry_response?(http_success | http_failure) :: boolean
   # 409 conflict
   defp retry_response?({:ok, 409, _headers, _body}), do: true
+  # 429 rate limited
+  defp retry_response?({:ok, 429, _headers, _body}), do: true
   # Destination refused the connection, the connection was reset, or a
   # variety of other connection failures. This could occur from a single
   # saturated server, so retry in case it's intermittent.

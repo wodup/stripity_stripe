@@ -45,6 +45,10 @@ defmodule Stripe.APITest do
       assert Stripe.API.should_retry?({:error, :econnrefused})
     end
 
+    test "given HTTP 429 response" do
+      assert Stripe.API.should_retry?({:ok, 429, [], ""})
+    end
+
     test "given other error" do
       refute Stripe.API.should_retry?({:error, :unknown})
     end
