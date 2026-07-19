@@ -9,10 +9,10 @@ defmodule Stripe.Error do
   - `:source` – this is one of
     * `:internal` – the error occurred within the library. This is usually caused by an unexpected
       or missing parameter.
-    * `:network` – the error occurred while making the network request (i.e. `:hackney.request/5`
+    * `:network` – the error occurred while making the network request (i.e. `Req.request/1`
       returned an error.) In this case, `:code` will always be `:network_error`. The
-      `:hackney_reason` field in the `:extra` map contains the actual error reason received from
-      hackney.
+      `:http_reason` field in the `:extra` map contains the actual error reason received from
+      the HTTP client.
     * `:stripe` – an error response was received from Stripe.
   - `:code` – an atom indicating the particular error. See "Error Codes" for more detail.
   - `:request_id` – if `:source` is `:stripe`, this will contain the
@@ -37,7 +37,7 @@ defmodule Stripe.Error do
     created.
   - `:http_status` – for `:stripe` errors, the HTTP status returned with the error.
   - `:raw_error` – the raw error map received from Stripe.
-  - `:hackney_reason` – for `:network` errors, contains the error reason received from hackney.
+  - `:http_reason` – for `:network` errors, contains the error reason received from the HTTP client.
 
   ## Error Codes
   The `:code` fields may be one of the following:
@@ -103,7 +103,7 @@ defmodule Stripe.Error do
             optional(:charge_id) => Stripe.id(),
             optional(:http_status) => 400..599,
             optional(:raw_error) => map,
-            optional(:hackney_reason) => any
+            optional(:http_reason) => any
           }
         }
 
@@ -117,17 +117,15 @@ defmodule Stripe.Error do
   end
 
   @doc false
-  @spec from_hackney_error(any) :: t
-  def from_hackney_error(reason) do
+  @spec from_http_error(any) :: t
+  def from_http_error(reason) do
     %__MODULE__{
       source: :network,
       code: :network_error,
       message:
-        "An error occurred while making the network request. The HTTP client returned the following reason: #{
-          inspect(reason)
-        }",
+        "An error occurred while making the network request. The HTTP client returned the following reason: #{inspect(reason)}",
       extra: %{
-        hackney_reason: reason
+        http_reason: reason
       }
     }
   end

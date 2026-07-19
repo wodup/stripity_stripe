@@ -10,15 +10,9 @@ defmodule Stripe.Mixfile do
         plt_add_apps: [:mix],
         plt_file: {:no_warn, "priv/plts/stripity_stripe.plt"}
       ],
-      elixir: "~> 1.7",
+      elixir: "~> 1.15",
       package: package(),
       elixirc_paths: elixirc_paths(Mix.env()),
-      preferred_cli_env: [
-        coveralls: :test,
-        "coveralls.detail": :test,
-        "coveralls.post": :test,
-        "coveralls.html": :test
-      ],
       test_coverage: [tool: ExCoveralls],
       version: "2.10.0",
       source_url: "https://github.com/code-corps/stripity_stripe/",
@@ -31,11 +25,21 @@ defmodule Stripe.Mixfile do
     ]
   end
 
+  def cli do
+    [
+      preferred_envs: [
+        coveralls: :test,
+        "coveralls.detail": :test,
+        "coveralls.post": :test,
+        "coveralls.html": :test
+      ]
+    ]
+  end
+
   # Configuration for the OTP application
   def application do
     [
-      applications: apps(Mix.env()),
-      extra_applications: [:plug],
+      extra_applications: [:logger],
       env: env(),
       mod: {Stripe, []}
     ]
@@ -57,16 +61,13 @@ defmodule Stripe.Mixfile do
     ]
   end
 
-  defp apps(:test), do: apps()
-  defp apps(_), do: apps()
-  defp apps(), do: [:hackney, :logger, :jason, :uri_query]
-
   defp deps do
     [
       {:dialyxir, "1.0.0-rc.4", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.23.0", only: :dev},
       {:excoveralls, "~> 0.11.1", only: :test},
-      {:hackney, "~> 1.15"},
+      {:req, "~> 0.6"},
+      {:finch, "~> 0.19"},
       {:inch_ex, "~> 2.0", only: [:dev, :test]},
       {:mox, "~> 0.4", only: :test},
       {:jason, "~> 1.1"},

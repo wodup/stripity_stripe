@@ -89,18 +89,75 @@ config :stripity_stripe, json_library: Poison
 
 ### Timeout
 
-To set timeouts, pass opts for the http client. The default one is Hackney.
+Requests are made with [Req](https://hexdocs.pm/req). Any option Req accepts can
+be set under `:req_options`, which is merged into every request:
 
 ```ex
-config :stripity_stripe, hackney_opts: [{:connect_timeout, 1000}, {:recv_timeout, 5000}]
+config :stripity_stripe, req_options: [receive_timeout: 5000]
 ```
+
+Connection timeouts are configured on the library's own connection pool instead,
+since Req will not combine `:connect_options` with a supervised pool:
+
+```ex
+config :stripity_stripe, :pool_options, connect_timeout: 1000
+```
+
+### Testing
+
+Because requests go through Req, `Req.Test` can be used to stub Stripe in your
+own test suite - no HTTP server required:
+
+```ex
+# config/test.exs
+config :stripity_stripe, req_options: [plug: {Req.Test, Stripe.API}]
+```
+
+```ex
+test "creates a customer" do
+  Req.Test.expect(Stripe.API, fn conn ->
+    Req.Test.json(conn, %{"id" => "cus_123", "object" => "customer"})
+  end)
+
+  assert {:ok, %Stripe.Customer{id: "cus_123"}} = Stripe.Customer.create(%{})
+end
+```
+
+If Stripe is called from a process other than the test process, allow it with
+`Req.Test.allow/3`.
 
 ### Request Retries
 
 To set retries, you can pass the number of attempts and range of backoff (time between attempting the request again) in milliseconds.
 
 ```ex
-config :stripity_stripe, :retries, [max_attempts: 3, base_backoff: 500, max_backoff: 2_000]
+config :stripity_stripe, :retries, [max_attempts: 5, base_backoff: 500, max_backoff: 2_000]
+```
+
+Note that `:max_attempts` counts retries rather than total requests, so the
+default of `5` allows six requests. With the default backoff that adds between
+4 and 8.5 seconds of waiting to a request that fails every time, on top of the
+time the six requests themselves take - which is bounded by `:receive_timeout`,
+so consider the two settings together.
+
+A request is retried when:
+
+* Stripe sets `Stripe-Should-Retry: true`. This header is authoritative in both
+  directions - `false` prevents a retry that would otherwise happen.
+* The response is a `409`, `429`, `500`, `502`, `503` or `504`. Stripe treats
+  `500`s as indeterminate; retrying is safe because every non-`GET`/`HEAD`
+  request carries an `Idempotency-Key`, and Stripe guarantees the idempotency
+  of `GET` and `DELETE`.
+* The request failed to reach Stripe at all (connection refused, timeout).
+
+Delays follow an exponential backoff with jitter, as
+[Stripe recommends](https://docs.stripe.com/rate-limits). Stripe does not send
+`Retry-After`, but it is honoured when present - an intermediary may return a
+`503` carrying one - capped by `:max_retry_after` (default 60 seconds) so that
+an oversized value cannot block the caller:
+
+```ex
+config :stripity_stripe, :retries, [max_attempts: 5, max_retry_after: 60_000]
 ```
 
 ## Examples

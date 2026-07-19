@@ -12,17 +12,18 @@ defmodule Stripe.API do
   @type method :: :get | :post | :put | :delete | :patch
   @type headers :: %{String.t() => String.t()} | %{}
   @type body :: iodata() | {:multipart, list()}
-  @typep http_success :: {:ok, integer, [{String.t(), String.t()}], String.t()}
+  @typep http_success :: {:ok, integer, %{String.t() => [String.t()]}, String.t()}
   @typep http_failure :: {:error, term}
 
-  @pool_name __MODULE__
+  @finch_name __MODULE__.Finch
   @api_version "2019-12-03"
 
   @idempotency_key_header "Idempotency-Key"
 
-  @default_max_attempts 3
+  @default_max_attempts 5
   @default_base_backoff 500
   @default_max_backoff 2_000
+  @default_max_retry_after 60_000
 
   @doc """
   In config.exs your implicit or expicit configuration is:
@@ -36,10 +37,37 @@ defmodule Stripe.API do
 
   def supervisor_children do
     if use_pool?() do
-      [:hackney_pool.child_spec(@pool_name, get_pool_options())]
+      [{Finch, name: @finch_name, pools: %{default: finch_pool_options()}}]
     else
       []
     end
+  end
+
+  # Translates the library's historical (hackney-derived) `:pool_options` into
+  # their Finch equivalents:
+  #
+  #   * `:max_connections`  – connections held per origin -> Finch's `:size`
+  #   * `:timeout`          – how long an idle connection is kept before being
+  #                           closed -> Finch's `:pool_max_idle_time`
+  #   * `:connect_timeout`  – how long to wait when establishing a connection
+  #                           -> Finch's `:conn_opts`
+  #
+  @spec finch_pool_options() :: Keyword.t()
+  defp finch_pool_options() do
+    opts = get_pool_options() || []
+
+    [
+      size: Keyword.get(opts, :max_connections, 10),
+      pool_max_idle_time: Keyword.get(opts, :timeout, 5_000)
+    ]
+    |> put_conn_opts(Keyword.get(opts, :connect_timeout))
+  end
+
+  @spec put_conn_opts(Keyword.t(), non_neg_integer | nil) :: Keyword.t()
+  defp put_conn_opts(pool_options, nil), do: pool_options
+
+  defp put_conn_opts(pool_options, connect_timeout) do
+    Keyword.put(pool_options, :conn_opts, transport_opts: [timeout: connect_timeout])
   end
 
   @spec get_pool_options() :: Keyword.t()
@@ -73,9 +101,20 @@ defmodule Stripe.API do
     Config.resolve(:use_connection_pool)
   end
 
-  @spec http_module() :: module
-  defp http_module() do
-    Config.resolve(:http_module, :hackney)
+  # Options merged into every `Req` request the library makes.
+  #
+  # Anything `Req` accepts is valid here, which is also the supported way to
+  # inject a test stub:
+  #
+  #     config :stripity_stripe,
+  #       req_options: [plug: {Req.Test, Stripe.API}]
+  #
+  @spec req_options() :: Keyword.t()
+  defp req_options() do
+    case Config.resolve(:req_options, []) do
+      opts when is_list(opts) -> opts
+      _ -> []
+    end
   end
 
   @spec retry_config() :: Keyword.t()
@@ -118,29 +157,32 @@ defmodule Stripe.API do
     Base.hex_encode32(binary, case: :lower, padding: false)
   end
 
+  # `Accept-Encoding` and `Connection` are deliberately not set here: Req sets
+  # `Accept-Encoding` from the `:compressed` option in `build_req_options/1` and
+  # decompresses the response to match, and Finch owns connection reuse.
   @spec add_common_headers(headers) :: headers
   defp add_common_headers(existing_headers) do
     Map.merge(existing_headers, %{
-      "Accept" => "application/json; charset=utf8",
-      "Accept-Encoding" => "gzip",
-      "Connection" => "keep-alive"
+      "Accept" => "application/json; charset=utf8"
     })
   end
 
-  @spec add_default_headers(headers) :: headers
-  defp add_default_headers(existing_headers) do
+  # Multipart requests intentionally carry no `Content-Type`: Req generates it,
+  # along with the boundary, when it encodes the `:form_multipart` body.
+  @spec add_default_headers(headers, body) :: headers
+  defp add_default_headers(existing_headers, {:multipart, _parts}) do
+    existing_headers
+    |> add_common_headers()
+    |> Map.delete("Content-Type")
+  end
+
+  defp add_default_headers(existing_headers, _body) do
     existing_headers = add_common_headers(existing_headers)
 
     case Map.has_key?(existing_headers, "Content-Type") do
       false -> existing_headers |> Map.put("Content-Type", "application/x-www-form-urlencoded")
       true -> existing_headers
     end
-  end
-
-  @spec add_multipart_form_headers(headers) :: headers
-  defp add_multipart_form_headers(existing_headers) do
-    existing_headers
-    |> Map.put("Content-Type", "multipart/form-data")
   end
 
   @spec add_idempotency_headers(headers, method) :: headers
@@ -193,24 +235,38 @@ defmodule Stripe.API do
     })
   end
 
-  @spec add_default_options(list) :: list
-  defp add_default_options(opts) do
-    [:with_body | opts]
+  # Options every request is built with.
+  #
+  #   * `:decode_body` is disabled because responses are decoded with the
+  #     configured `json_library/0`, which callers may override. Decompression
+  #     is a separate step and stays enabled.
+  #   * `:retry` is disabled in favour of the library's own retry policy - see
+  #     `should_retry?/3` and `backoff/2`.
+  #   * `:redirect` is disabled because the Stripe API does not redirect, and
+  #     following one silently would turn an anomalous response into an
+  #     apparently successful request. A 3xx surfaces as a `Stripe.Error`.
+  #   * `:compressed` is enabled so Req sets `Accept-Encoding` and decompresses
+  #     the response. It defaults to `false`, so without this responses would
+  #     come back uncompressed.
+  #
+  # Per-request options win over the `:req_options` config, which in turn wins
+  # over these defaults.
+  @spec build_req_options(list) :: Keyword.t()
+  defp build_req_options(opts) do
+    [decode_body: false, retry: false, redirect: false, compressed: true]
+    |> Keyword.merge(req_options())
+    |> Keyword.merge(opts)
+    |> add_finch_option()
   end
 
-  @spec add_pool_option(list) :: list
-  defp add_pool_option(opts) do
-    if use_pool?() do
-      [{:pool, @pool_name} | opts]
-    else
-      opts
-    end
-  end
-
-  @spec add_options_from_config(list) :: list
-  defp add_options_from_config(opts) do
-    if is_list(Stripe.Config.resolve(:hackney_opts)) do
-      opts ++ Stripe.Config.resolve(:hackney_opts)
+  # Req refuses to combine a named Finch instance with `:connect_options`,
+  # since the latter makes it build and supervise a pool of its own. Connection
+  # tuning for the library's pool belongs in `:pool_options` instead, so an
+  # explicit `:connect_options` is taken as a deliberate opt out of that pool.
+  @spec add_finch_option(Keyword.t()) :: Keyword.t()
+  defp add_finch_option(opts) do
+    if use_pool?() and not Keyword.has_key?(opts, :connect_options) do
+      Keyword.put(opts, :finch, @finch_name)
     else
       opts
     end
@@ -280,17 +336,13 @@ defmodule Stripe.API do
     base_url = get_upload_url()
     req_url = base_url <> endpoint
 
-    req_headers =
-      headers
-      |> add_multipart_form_headers()
-
     parts =
       body
       |> Enum.map(fn {key, value} ->
         {Stripe.Util.multipart_key(key), value}
       end)
 
-    perform_request(req_url, :post, {:multipart, parts}, req_headers, opts)
+    perform_request(req_url, :post, {:multipart, parts}, headers, opts)
   end
 
   def request_file_upload(body, method, endpoint, headers, opts) do
@@ -318,19 +370,13 @@ defmodule Stripe.API do
 
     req_headers =
       %{}
-      |> add_default_headers()
+      |> add_default_headers(req_body)
       |> maybe_add_auth_header_oauth(endpoint, api_key)
       |> add_api_version(api_version)
       |> add_idempotency_headers(method)
       |> Map.to_list()
 
-    req_opts =
-      []
-      |> add_default_options()
-      |> add_pool_option()
-      |> add_options_from_config()
-
-    do_perform_request(method, req_url, req_headers, req_body, req_opts)
+    do_perform_request(method, req_url, req_headers, req_body, build_req_options([]))
   end
 
   @spec perform_request(String.t(), method, body, headers, list) ::
@@ -342,20 +388,14 @@ defmodule Stripe.API do
 
     req_headers =
       headers
-      |> add_default_headers()
+      |> add_default_headers(body)
       |> add_auth_header(api_key)
       |> add_connect_header(connect_account_id)
       |> add_api_version(api_version)
       |> add_idempotency_headers(method)
       |> Map.to_list()
 
-    req_opts =
-      opts
-      |> add_default_options()
-      |> add_pool_option()
-      |> add_options_from_config()
-
-    do_perform_request(method, req_url, req_headers, body, req_opts)
+    do_perform_request(method, req_url, req_headers, body, build_req_options(opts))
   end
 
   @spec do_perform_request(method, String.t(), [headers], body, list) ::
@@ -377,7 +417,7 @@ defmodule Stripe.API do
   end
 
   defp do_perform_request_and_retry(method, url, headers, body, opts, {:attempts, attempts}) do
-    response = http_module().request(method, url, headers, body, opts)
+    response = perform_req_request(method, url, headers, body, opts)
 
     do_perform_request_and_retry(
       method,
@@ -389,12 +429,60 @@ defmodule Stripe.API do
     )
   end
 
+  # Performs a single request with Req, normalising the result into the
+  # library's internal response shape. Keeping that shape means `should_retry?/3`
+  # and `handle_response/1` stay independent of the HTTP client.
+  @spec perform_req_request(method, String.t(), [headers], body, Keyword.t()) ::
+          http_success | http_failure
+  defp perform_req_request(method, url, headers, body, opts) do
+    req_options =
+      opts
+      |> Keyword.merge(method: method, url: url, headers: headers)
+      |> put_request_body(body)
+
+    case Req.request(req_options) do
+      {:ok, %Req.Response{status: status, headers: resp_headers, body: resp_body}} ->
+        {:ok, status, resp_headers, resp_body}
+
+      {:error, exception} ->
+        {:error, transport_reason(exception)}
+    end
+  end
+
+  @spec put_request_body(Keyword.t(), body) :: Keyword.t()
+  defp put_request_body(opts, {:multipart, parts}) do
+    Keyword.put(opts, :form_multipart, Enum.map(parts, &multipart_part/1))
+  end
+
+  defp put_request_body(opts, body), do: Keyword.put(opts, :body, body)
+
+  # `Stripe.Util.multipart_key/1` tags the file part with the `:file` atom. Its
+  # value is a path, optionally `@`-prefixed for parity with curl.
+  #
+  # Req names multipart parts with atoms. Keys reaching this point are Stripe
+  # field names supplied by the application, so the set is bounded.
+  @spec multipart_part({atom | String.t(), any}) :: {atom, any}
+  defp multipart_part({:file, path}) when is_binary(path) do
+    path = String.trim_leading(path, "@")
+    {:file, {File.read!(path), filename: Path.basename(path)}}
+  end
+
+  defp multipart_part({key, value}) when is_atom(key), do: {key, value}
+  defp multipart_part({key, value}) when is_binary(key), do: {String.to_atom(key), value}
+
+  # Req reports transport failures as exception structs (`Req.TransportError`,
+  # `Mint.TransportError`, ...). Unwrapping to the bare reason keeps the retry
+  # policy in `retry_response?/1` expressed in terms of plain atoms.
+  @spec transport_reason(Exception.t()) :: any
+  defp transport_reason(%{reason: reason}), do: reason
+  defp transport_reason(exception), do: exception
+
   @spec add_attempts(http_success | http_failure, non_neg_integer, Keyword.t()) ::
           {:attempts, non_neg_integer} | {:response, http_success | http_failure}
   defp add_attempts(response, attempts, retry_config) do
     if should_retry?(response, attempts, retry_config) do
-      attempts
-      |> backoff(retry_config)
+      response
+      |> retry_delay(attempts, retry_config)
       |> :timer.sleep()
 
       {:attempts, attempts + 1}
@@ -402,6 +490,41 @@ defmodule Stripe.API do
       {:response, response}
     end
   end
+
+  # Stripe does not send `Retry-After`; its documented guidance for 429 is an
+  # exponential backoff with jitter, which `backoff/2` implements. The header is
+  # still honoured when present, since intermediaries can produce a 503 that
+  # carries one, and it is capped so a hostile or mistaken value cannot block
+  # the caller indefinitely.
+  @spec retry_delay(http_success | http_failure, non_neg_integer, Keyword.t()) :: non_neg_integer
+  defp retry_delay({:ok, _status, headers, _body}, attempts, retry_config) do
+    case fetch_retry_after(headers) do
+      nil -> backoff(attempts, retry_config)
+      delay -> min(delay, max_retry_after(retry_config))
+    end
+  end
+
+  defp retry_delay(_response, attempts, retry_config), do: backoff(attempts, retry_config)
+
+  @spec max_retry_after(Keyword.t()) :: non_neg_integer
+  defp max_retry_after(config) do
+    Keyword.get(config, :max_retry_after) || @default_max_retry_after
+  end
+
+  # `Retry-After` may be a number of seconds or an HTTP date. Only the former is
+  # recognised; the date form falls back to the exponential backoff rather than
+  # pulling in a date parser for a header Stripe does not send.
+  @spec fetch_retry_after(map | any) :: non_neg_integer | nil
+  defp fetch_retry_after(headers) when is_map(headers) do
+    with [value | _] <- Map.get(headers, "retry-after", []),
+         {seconds, ""} when seconds >= 0 <- Integer.parse(value) do
+      :timer.seconds(seconds)
+    else
+      _ -> nil
+    end
+  end
+
+  defp fetch_retry_after(_headers), do: nil
 
   @doc """
   Returns backoff in milliseconds.
@@ -425,10 +548,16 @@ defmodule Stripe.API do
   end
 
   @spec retry_response?(http_success | http_failure) :: boolean
-  # 409 conflict
-  defp retry_response?({:ok, 409, _headers, _body}), do: true
-  # 429 rate limited
-  defp retry_response?({:ok, 429, _headers, _body}), do: true
+  defp retry_response?({:ok, status, headers, _body}) do
+    # Stripe states whether a request is worth retrying in `Stripe-Should-Retry`.
+    # It is authoritative in both directions, so it overrides the status based
+    # policy below.
+    case fetch_should_retry(headers) do
+      nil -> retry_status?(status)
+      should_retry? -> should_retry?
+    end
+  end
+
   # Destination refused the connection, the connection was reset, or a
   # variety of other connection failures. This could occur from a single
   # saturated server, so retry in case it's intermittent.
@@ -449,18 +578,40 @@ defmodule Stripe.API do
   defp retry_response?({:error, :timeout}), do: true
   defp retry_response?(_response), do: false
 
-  @spec handle_response(http_success | http_failure) :: {:ok, map} | {:error, Stripe.Error.t()}
-  defp handle_response({:ok, status, headers, body}) when status >= 200 and status <= 299 do
-    decoded_body =
-      body
-      |> decompress_body(headers)
-      |> json_library().decode!()
+  @spec retry_status?(integer) :: boolean
+  # 409 conflict
+  defp retry_status?(409), do: true
+  # 429 rate limited
+  defp retry_status?(429), do: true
+  # Stripe treats 500s as indeterminate - the request may or may not have taken
+  # effect. Every non-GET/HEAD request carries an idempotency key, and Stripe
+  # guarantees the idempotency of GET and DELETE, so retrying cannot duplicate
+  # the operation.
+  defp retry_status?(status) when status in [500, 502, 503, 504], do: true
+  defp retry_status?(_status), do: false
 
-    {:ok, decoded_body}
+  # Returns `true`/`false` when Stripe expressed an opinion, `nil` otherwise.
+  # Headers are only a map when they came from Req; `should_retry?/3` is public
+  # and documented as accepting a plain response tuple, so anything else is
+  # treated as "no opinion".
+  @spec fetch_should_retry(map | any) :: boolean | nil
+  defp fetch_should_retry(headers) when is_map(headers) do
+    case Map.get(headers, "stripe-should-retry") do
+      ["true" | _] -> true
+      ["false" | _] -> false
+      _ -> nil
+    end
+  end
+
+  defp fetch_should_retry(_headers), do: nil
+
+  @spec handle_response(http_success | http_failure) :: {:ok, map} | {:error, Stripe.Error.t()}
+  defp handle_response({:ok, status, _headers, body}) when status >= 200 and status <= 299 do
+    {:ok, json_library().decode!(body)}
   end
 
   defp handle_response({:ok, status, headers, body}) when status >= 300 and status <= 599 do
-    request_id = headers |> List.keyfind("Request-Id", 0)
+    request_id = fetch_request_id(headers)
 
     error =
       case json_library().decode(body) do
@@ -479,19 +630,21 @@ defmodule Stripe.API do
   end
 
   defp handle_response({:error, reason}) do
-    error = Error.from_hackney_error(reason)
+    error = Error.from_http_error(reason)
     {:error, error}
   end
 
-  defp decompress_body(body, headers) do
-    headers_dict = :hackney_headers.new(headers)
-
-    case :hackney_headers.get_value("Content-Encoding", headers_dict) do
-      "gzip" -> :zlib.gunzip(body)
-      "deflate" -> :zlib.unzip(body)
-      _ -> body
+  # Req normalises response headers to a map of downcased name => list of values.
+  @spec fetch_request_id(map) :: String.t() | nil
+  defp fetch_request_id(headers) when is_map(headers) do
+    case Map.get(headers, "request-id") do
+      [request_id | _] -> request_id
+      request_id when is_binary(request_id) -> request_id
+      _ -> nil
     end
   end
+
+  defp fetch_request_id(_headers), do: nil
 
   defp prepend_url("", url), do: url
   defp prepend_url(query, url), do: "#{url}?#{query}"

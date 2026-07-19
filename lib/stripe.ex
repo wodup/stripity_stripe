@@ -38,9 +38,9 @@ defmodule Stripe do
 
   Stripity Stripe is set up to use an HTTP connection pool by default. This
   means that it will reuse already opened HTTP connections in order to
-  minimize the overhead of establishing connections. The pool is directly
-  supervised by Stripity Stripe. Two configuration options are
-  available to tune how this pool works: `:timeout` and `:max_connections`.
+  minimize the overhead of establishing connections. The pool is a `Finch`
+  instance directly supervised by Stripity Stripe. Three configuration options
+  are available to tune how this pool works:
 
   `:timeout` is the amount of time that a connection will be allowed
   to remain open but idle (no data passing over it) before it is closed
@@ -49,17 +49,32 @@ defmodule Stripe do
   `:max_connections` is the maximum number of connections that can be
   open at any time. This defaults to 10.
 
-  Both these settings are located under the `:pool_options` key in
+  `:connect_timeout` is the amount of time to wait when establishing a new
+  connection. It is unset by default, leaving Finch's own default in place.
+
+  These settings are located under the `:pool_options` key in
   your application configuration:
 
       config :stripity_stripe, :pool_options,
         timeout: 5_000,
-        max_connections: 10
+        max_connections: 10,
+        connect_timeout: 1_000
 
   If you prefer, you can also turn pooling off completely using
   the `:use_connection_pool` setting:
 
       config :stripity_stripe, use_connection_pool: false
+
+  ### Request Options
+
+  Any option `Req` accepts can be set under `:req_options` and is merged into
+  every request the library makes, with per-request options taking precedence:
+
+      config :stripity_stripe, req_options: [receive_timeout: 5_000]
+
+  This is also how requests are stubbed in tests:
+
+      config :stripity_stripe, req_options: [plug: {Req.Test, Stripe.API}]
 
   """
   use Application
