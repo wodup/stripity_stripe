@@ -53,10 +53,7 @@ defmodule Stripe.Mixfile do
     [
       api_base_url: "https://api.stripe.com/v1/",
       api_upload_url: "https://files.stripe.com/v1/",
-      pool_options: [
-        size: 10,
-        conn_max_idle_time: 5_000
-      ],
+      pool_options: [],
       use_connection_pool: true
     ]
   end

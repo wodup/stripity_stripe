@@ -102,10 +102,14 @@ since Req will not combine `:connect_options` with a supervised pool. The
 
 ```ex
 config :stripity_stripe, :pool_options,
-  size: 10,
-  conn_max_idle_time: 5_000,
+  size: 50,
+  conn_max_idle_time: 60_000,
   conn_opts: [transport_opts: [timeout: 1_000]]
 ```
+
+The library sets none of these, so Finch's defaults apply unless you say
+otherwise. See `Stripe`'s moduledoc for what `:conn_max_idle_time` is and is not
+protecting you from.
 
 ### Testing
 

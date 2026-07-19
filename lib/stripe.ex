@@ -42,24 +42,28 @@ defmodule Stripe do
   instance directly supervised by Stripity Stripe.
 
   It is configured through the `:pool_options` key, which is passed to Finch
-  verbatim - see `Finch.start_link/1` for the full list of options:
+  verbatim - see `Finch.start_link/1` for the full list of options. This library
+  sets none of them, so Finch's own defaults apply unless you say otherwise:
 
       config :stripity_stripe, :pool_options,
-        size: 10,
-        conn_max_idle_time: 5_000,
-        conn_opts: [transport_opts: [timeout: 1_000]]
+        size: 50,
+        conn_max_idle_time: 60_000
 
-  The two options worth knowing about:
+  The two worth knowing about:
 
-  `:size` is the maximum number of connections held per origin, defaulting to
-  10 here. Connections are opened lazily, so this is a ceiling rather than a
-  reservation, and exhausting it makes further requests wait in a checkout
-  queue until `:pool_timeout` elapses.
+  `:size` is the maximum number of connections held per origin. Connections are
+  opened lazily, so this is a ceiling rather than a reservation, and exhausting
+  it makes further requests wait in a checkout queue until `:pool_timeout`
+  elapses. Raise it if you make many concurrent calls, remembering that retries
+  occupy connections too.
 
-  `:conn_max_idle_time` is how long a connection may sit idle before it is
-  closed rather than handed out, defaulting to 5 seconds here. This is what
-  keeps a keep-alive socket the peer has already closed from being reused, so
-  raising it trades reconnections for a wider window on that race.
+  `:conn_max_idle_time` closes a connection that has sat idle for too long
+  rather than handing it out. It is worth setting as a backstop against a NAT
+  or load balancer that drops an idle connection *silently*, which would
+  otherwise cost a full `:receive_timeout` before the request could be retried.
+  It is not needed for the ordinary case: Finch holds idle pooled connections
+  in active mode, so a peer closing one arrives as a message and the connection
+  is evicted before it can be reused.
 
   Note that `:conn_max_idle_time` expires a single connection, whereas Finch's
   similarly named `:pool_max_idle_time` terminates the whole pool.
