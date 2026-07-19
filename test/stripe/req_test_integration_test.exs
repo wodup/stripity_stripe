@@ -160,6 +160,94 @@ defmodule Stripe.ReqTestIntegrationTest do
       refute_received :attempt
     end
 
+    test "a 500 is retried" do
+      put_retry_config(max_attempts: 1, base_backoff: 1, max_backoff: 1)
+      test_pid = self()
+
+      Req.Test.expect(Stripe.API, fn conn ->
+        send(test_pid, {:attempt, idempotency_key(conn)})
+        Plug.Conn.send_resp(conn, 500, ~s({"error": {"type": "api_error"}}))
+      end)
+
+      Req.Test.expect(Stripe.API, fn conn ->
+        send(test_pid, {:attempt, idempotency_key(conn)})
+        Req.Test.json(conn, %{"id" => "cus_123", "object" => "customer"})
+      end)
+
+      assert {:ok, %Stripe.Customer{}} = Stripe.Customer.create(%{})
+
+      assert_received {:attempt, first_key}
+      assert_received {:attempt, second_key}
+      assert first_key == second_key
+    end
+
+    test "Stripe-Should-Retry false suppresses a retry that would otherwise happen" do
+      put_retry_config(max_attempts: 3, base_backoff: 1, max_backoff: 1)
+      test_pid = self()
+
+      Req.Test.stub(Stripe.API, fn conn ->
+        send(test_pid, :attempt)
+
+        conn
+        |> Plug.Conn.put_resp_header("stripe-should-retry", "false")
+        |> Plug.Conn.send_resp(429, ~s({"error": {"type": "rate_limit_error"}}))
+      end)
+
+      assert {:error, %Stripe.Error{extra: %{http_status: 429}}} = Stripe.Customer.create(%{})
+
+      assert_received :attempt
+      refute_received :attempt
+    end
+
+    test "Stripe-Should-Retry true forces a retry that would otherwise not happen" do
+      put_retry_config(max_attempts: 1, base_backoff: 1, max_backoff: 1)
+      test_pid = self()
+
+      Req.Test.expect(Stripe.API, fn conn ->
+        send(test_pid, :attempt)
+
+        conn
+        |> Plug.Conn.put_resp_header("stripe-should-retry", "true")
+        |> Plug.Conn.send_resp(400, ~s({"error": {"type": "invalid_request_error"}}))
+      end)
+
+      Req.Test.expect(Stripe.API, fn conn ->
+        send(test_pid, :attempt)
+        Req.Test.json(conn, %{"id" => "cus_123", "object" => "customer"})
+      end)
+
+      assert {:ok, %Stripe.Customer{}} = Stripe.Customer.create(%{})
+
+      assert_received :attempt
+      assert_received :attempt
+    end
+
+    test "Retry-After is honoured over the computed backoff, and capped" do
+      # A backoff long enough that the test would visibly stall if it were used,
+      # and a cap low enough that an oversized Retry-After cannot stall either.
+      put_retry_config(
+        max_attempts: 1,
+        base_backoff: 30_000,
+        max_backoff: 30_000,
+        max_retry_after: 5
+      )
+
+      Req.Test.expect(Stripe.API, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("retry-after", "600")
+        |> Plug.Conn.send_resp(503, ~s({"error": {"type": "api_error"}}))
+      end)
+
+      Req.Test.expect(Stripe.API, fn conn ->
+        Req.Test.json(conn, %{"id" => "cus_123", "object" => "customer"})
+      end)
+
+      {elapsed_us, result} = :timer.tc(fn -> Stripe.Customer.create(%{}) end)
+
+      assert {:ok, %Stripe.Customer{}} = result
+      assert elapsed_us < 1_000_000
+    end
+
     test "a non retryable status is not retried" do
       put_retry_config(max_attempts: 3, base_backoff: 1, max_backoff: 1)
       test_pid = self()

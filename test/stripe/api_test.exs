@@ -57,6 +57,26 @@ defmodule Stripe.APITest do
       refute Stripe.API.should_retry?({:ok, 200, [], ""})
     end
 
+    test "given HTTP 500 response" do
+      assert Stripe.API.should_retry?({:ok, 500, [], ""})
+    end
+
+    test "given HTTP 503 response" do
+      assert Stripe.API.should_retry?({:ok, 503, [], ""})
+    end
+
+    test "given HTTP 400 response" do
+      refute Stripe.API.should_retry?({:ok, 400, [], ""})
+    end
+
+    test "given Stripe-Should-Retry false on an otherwise retryable status" do
+      refute Stripe.API.should_retry?({:ok, 429, %{"stripe-should-retry" => ["false"]}, ""})
+    end
+
+    test "given Stripe-Should-Retry true on an otherwise final status" do
+      assert Stripe.API.should_retry?({:ok, 400, %{"stripe-should-retry" => ["true"]}, ""})
+    end
+
     test "given attempts greater than max_attempts" do
       refute Stripe.API.should_retry?({:error, :timeout}, 2, max_attempts: 1)
     end

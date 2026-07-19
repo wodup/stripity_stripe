@@ -134,6 +134,29 @@ To set retries, you can pass the number of attempts and range of backoff (time b
 config :stripity_stripe, :retries, [max_attempts: 3, base_backoff: 500, max_backoff: 2_000]
 ```
 
+Note that `:max_attempts` counts retries rather than total requests, so the
+default of `3` allows four requests.
+
+A request is retried when:
+
+* Stripe sets `Stripe-Should-Retry: true`. This header is authoritative in both
+  directions - `false` prevents a retry that would otherwise happen.
+* The response is a `409`, `429`, `500`, `502`, `503` or `504`. Stripe treats
+  `500`s as indeterminate; retrying is safe because every non-`GET`/`HEAD`
+  request carries an `Idempotency-Key`, and Stripe guarantees the idempotency
+  of `GET` and `DELETE`.
+* The request failed to reach Stripe at all (connection refused, timeout).
+
+Delays follow an exponential backoff with jitter, as
+[Stripe recommends](https://docs.stripe.com/rate-limits). Stripe does not send
+`Retry-After`, but it is honoured when present - an intermediary may return a
+`503` carrying one - capped by `:max_retry_after` (default 60 seconds) so that
+an oversized value cannot block the caller:
+
+```ex
+config :stripity_stripe, :retries, [max_attempts: 3, max_retry_after: 60_000]
+```
+
 ## Examples
 
 Stripe supports a token based, and intent based approach for processing payments. The token based approach is simpler, but it is not supported in Europe. The intents API is the way forward, and should be used for new development.

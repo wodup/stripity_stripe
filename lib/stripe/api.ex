@@ -23,6 +23,7 @@ defmodule Stripe.API do
   @default_max_attempts 3
   @default_base_backoff 500
   @default_max_backoff 2_000
+  @default_max_retry_after 60_000
 
   @doc """
   In config.exs your implicit or expicit configuration is:
@@ -473,8 +474,8 @@ defmodule Stripe.API do
           {:attempts, non_neg_integer} | {:response, http_success | http_failure}
   defp add_attempts(response, attempts, retry_config) do
     if should_retry?(response, attempts, retry_config) do
-      attempts
-      |> backoff(retry_config)
+      response
+      |> retry_delay(attempts, retry_config)
       |> :timer.sleep()
 
       {:attempts, attempts + 1}
@@ -482,6 +483,41 @@ defmodule Stripe.API do
       {:response, response}
     end
   end
+
+  # Stripe does not send `Retry-After`; its documented guidance for 429 is an
+  # exponential backoff with jitter, which `backoff/2` implements. The header is
+  # still honoured when present, since intermediaries can produce a 503 that
+  # carries one, and it is capped so a hostile or mistaken value cannot block
+  # the caller indefinitely.
+  @spec retry_delay(http_success | http_failure, non_neg_integer, Keyword.t()) :: non_neg_integer
+  defp retry_delay({:ok, _status, headers, _body}, attempts, retry_config) do
+    case fetch_retry_after(headers) do
+      nil -> backoff(attempts, retry_config)
+      delay -> min(delay, max_retry_after(retry_config))
+    end
+  end
+
+  defp retry_delay(_response, attempts, retry_config), do: backoff(attempts, retry_config)
+
+  @spec max_retry_after(Keyword.t()) :: non_neg_integer
+  defp max_retry_after(config) do
+    Keyword.get(config, :max_retry_after) || @default_max_retry_after
+  end
+
+  # `Retry-After` may be a number of seconds or an HTTP date. Only the former is
+  # recognised; the date form falls back to the exponential backoff rather than
+  # pulling in a date parser for a header Stripe does not send.
+  @spec fetch_retry_after(map | any) :: non_neg_integer | nil
+  defp fetch_retry_after(headers) when is_map(headers) do
+    with [value | _] <- Map.get(headers, "retry-after", []),
+         {seconds, ""} when seconds >= 0 <- Integer.parse(value) do
+      :timer.seconds(seconds)
+    else
+      _ -> nil
+    end
+  end
+
+  defp fetch_retry_after(_headers), do: nil
 
   @doc """
   Returns backoff in milliseconds.
@@ -505,10 +541,16 @@ defmodule Stripe.API do
   end
 
   @spec retry_response?(http_success | http_failure) :: boolean
-  # 409 conflict
-  defp retry_response?({:ok, 409, _headers, _body}), do: true
-  # 429 rate limited
-  defp retry_response?({:ok, 429, _headers, _body}), do: true
+  defp retry_response?({:ok, status, headers, _body}) do
+    # Stripe states whether a request is worth retrying in `Stripe-Should-Retry`.
+    # It is authoritative in both directions, so it overrides the status based
+    # policy below.
+    case fetch_should_retry(headers) do
+      nil -> retry_status?(status)
+      should_retry? -> should_retry?
+    end
+  end
+
   # Destination refused the connection, the connection was reset, or a
   # variety of other connection failures. This could occur from a single
   # saturated server, so retry in case it's intermittent.
@@ -517,6 +559,33 @@ defmodule Stripe.API do
   defp retry_response?({:error, :connect_timeout}), do: true
   defp retry_response?({:error, :timeout}), do: true
   defp retry_response?(_response), do: false
+
+  @spec retry_status?(integer) :: boolean
+  # 409 conflict
+  defp retry_status?(409), do: true
+  # 429 rate limited
+  defp retry_status?(429), do: true
+  # Stripe treats 500s as indeterminate - the request may or may not have taken
+  # effect. Every non-GET/HEAD request carries an idempotency key, and Stripe
+  # guarantees the idempotency of GET and DELETE, so retrying cannot duplicate
+  # the operation.
+  defp retry_status?(status) when status in [500, 502, 503, 504], do: true
+  defp retry_status?(_status), do: false
+
+  # Returns `true`/`false` when Stripe expressed an opinion, `nil` otherwise.
+  # Headers are only a map when they came from Req; `should_retry?/3` is public
+  # and documented as accepting a plain response tuple, so anything else is
+  # treated as "no opinion".
+  @spec fetch_should_retry(map | any) :: boolean | nil
+  defp fetch_should_retry(headers) when is_map(headers) do
+    case Map.get(headers, "stripe-should-retry") do
+      ["true" | _] -> true
+      ["false" | _] -> false
+      _ -> nil
+    end
+  end
+
+  defp fetch_should_retry(_headers), do: nil
 
   @spec handle_response(http_success | http_failure) :: {:ok, map} | {:error, Stripe.Error.t()}
   defp handle_response({:ok, status, _headers, body}) when status >= 200 and status <= 299 do
