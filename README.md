@@ -131,11 +131,14 @@ If Stripe is called from a process other than the test process, allow it with
 To set retries, you can pass the number of attempts and range of backoff (time between attempting the request again) in milliseconds.
 
 ```ex
-config :stripity_stripe, :retries, [max_attempts: 3, base_backoff: 500, max_backoff: 2_000]
+config :stripity_stripe, :retries, [max_attempts: 5, base_backoff: 500, max_backoff: 2_000]
 ```
 
 Note that `:max_attempts` counts retries rather than total requests, so the
-default of `3` allows four requests.
+default of `5` allows six requests. With the default backoff that adds between
+4 and 8.5 seconds of waiting to a request that fails every time, on top of the
+time the six requests themselves take - which is bounded by `:receive_timeout`,
+so consider the two settings together.
 
 A request is retried when:
 
@@ -154,7 +157,7 @@ Delays follow an exponential backoff with jitter, as
 an oversized value cannot block the caller:
 
 ```ex
-config :stripity_stripe, :retries, [max_attempts: 3, max_retry_after: 60_000]
+config :stripity_stripe, :retries, [max_attempts: 5, max_retry_after: 60_000]
 ```
 
 ## Examples

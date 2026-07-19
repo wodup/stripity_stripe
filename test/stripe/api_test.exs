@@ -77,6 +77,11 @@ defmodule Stripe.APITest do
       assert Stripe.API.should_retry?({:ok, 400, %{"stripe-should-retry" => ["true"]}, ""})
     end
 
+    test "defaults to five retries" do
+      assert Stripe.API.should_retry?({:error, :timeout}, 4)
+      refute Stripe.API.should_retry?({:error, :timeout}, 5)
+    end
+
     test "given attempts greater than max_attempts" do
       refute Stripe.API.should_retry?({:error, :timeout}, 2, max_attempts: 1)
     end

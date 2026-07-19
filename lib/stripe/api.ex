@@ -20,7 +20,7 @@ defmodule Stripe.API do
 
   @idempotency_key_header "Idempotency-Key"
 
-  @default_max_attempts 3
+  @default_max_attempts 5
   @default_base_backoff 500
   @default_max_backoff 2_000
   @default_max_retry_after 60_000
