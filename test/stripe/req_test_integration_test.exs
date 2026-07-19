@@ -98,5 +98,87 @@ defmodule Stripe.ReqTestIntegrationTest do
              Stripe.FileUpload.create(%{file: path, purpose: "dispute_evidence"})
   end
 
+  describe "retries" do
+    test "a 429 is retried, reusing the same idempotency key" do
+      put_retry_config(max_attempts: 1, base_backoff: 1, max_backoff: 1)
+      test_pid = self()
+
+      Req.Test.expect(Stripe.API, fn conn ->
+        send(test_pid, {:attempt, idempotency_key(conn)})
+        Plug.Conn.send_resp(conn, 429, ~s({"error": {"type": "rate_limit_error"}}))
+      end)
+
+      Req.Test.expect(Stripe.API, fn conn ->
+        send(test_pid, {:attempt, idempotency_key(conn)})
+        Req.Test.json(conn, %{"id" => "cus_123", "object" => "customer"})
+      end)
+
+      assert {:ok, %Stripe.Customer{id: "cus_123"}} = Stripe.Customer.create(%{})
+
+      assert_received {:attempt, first_key}
+      assert_received {:attempt, second_key}
+
+      assert is_binary(first_key)
+      assert first_key == second_key
+    end
+
+    test "a 409 is retried" do
+      put_retry_config(max_attempts: 1, base_backoff: 1, max_backoff: 1)
+      test_pid = self()
+
+      Req.Test.expect(Stripe.API, fn conn ->
+        send(test_pid, :attempt)
+        Plug.Conn.send_resp(conn, 409, ~s({"error": {"type": "invalid_request_error"}}))
+      end)
+
+      Req.Test.expect(Stripe.API, fn conn ->
+        send(test_pid, :attempt)
+        Req.Test.json(conn, %{"id" => "cus_123", "object" => "customer"})
+      end)
+
+      assert {:ok, %Stripe.Customer{}} = Stripe.Customer.create(%{})
+
+      assert_received :attempt
+      assert_received :attempt
+    end
+
+    test "retrying gives up at max_attempts and returns the last response" do
+      put_retry_config(max_attempts: 2, base_backoff: 1, max_backoff: 1)
+      test_pid = self()
+
+      Req.Test.stub(Stripe.API, fn conn ->
+        send(test_pid, :attempt)
+        Plug.Conn.send_resp(conn, 429, ~s({"error": {"type": "rate_limit_error"}}))
+      end)
+
+      assert {:error, %Stripe.Error{extra: %{http_status: 429}}} = Stripe.Customer.create(%{})
+
+      # Attempts 0 and 1 retry, attempt 2 gives up: three requests in total.
+      assert_received :attempt
+      assert_received :attempt
+      assert_received :attempt
+      refute_received :attempt
+    end
+
+    test "a non retryable status is not retried" do
+      put_retry_config(max_attempts: 3, base_backoff: 1, max_backoff: 1)
+      test_pid = self()
+
+      Req.Test.stub(Stripe.API, fn conn ->
+        send(test_pid, :attempt)
+        Plug.Conn.send_resp(conn, 400, ~s({"error": {"type": "invalid_request_error"}}))
+      end)
+
+      assert {:error, %Stripe.Error{extra: %{http_status: 400}}} = Stripe.Customer.create(%{})
+
+      assert_received :attempt
+      refute_received :attempt
+    end
+  end
+
+  defp idempotency_key(conn) do
+    conn |> Plug.Conn.get_req_header("idempotency-key") |> List.first()
+  end
+
   defp put_retry_config(config), do: put_env(:retries, config)
 end
