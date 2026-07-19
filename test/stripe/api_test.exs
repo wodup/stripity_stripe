@@ -49,6 +49,14 @@ defmodule Stripe.APITest do
       assert Stripe.API.should_retry?({:ok, 429, [], ""})
     end
 
+    test "given a stale pooled connection" do
+      assert Stripe.API.should_retry?({:error, :invalid_state})
+    end
+
+    test "given a connection closed mid-request" do
+      assert Stripe.API.should_retry?({:error, :closed})
+    end
+
     test "given other error" do
       refute Stripe.API.should_retry?({:error, :unknown})
     end

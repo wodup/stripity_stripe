@@ -433,6 +433,17 @@ defmodule Stripe.API do
   # variety of other connection failures. This could occur from a single
   # saturated server, so retry in case it's intermittent.
   defp retry_response?({:error, :econnrefused}), do: true
+  # A pooled keep-alive connection that the peer closed after the pool handed
+  # it out but before the request was written. hackney cannot check the socket
+  # and send atomically, so it answers with an error instead of an exit
+  # precisely so the caller can retry on a fresh connection. The request never
+  # reached Stripe.
+  defp retry_response?({:error, :invalid_state}), do: true
+  # The same stale connection one step later: the request went out but the
+  # socket closed before the response came back. Whether Stripe processed it is
+  # unknowable from here, so this relies on the idempotency key, which is built
+  # once per request and reused across attempts.
+  defp retry_response?({:error, :closed}), do: true
   # Retry on timeout-related problems (either on open or read).
   defp retry_response?({:error, :connect_timeout}), do: true
   defp retry_response?({:error, :timeout}), do: true
