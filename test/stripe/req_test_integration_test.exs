@@ -98,6 +98,32 @@ defmodule Stripe.ReqTestIntegrationTest do
              Stripe.FileUpload.create(%{file: path, purpose: "dispute_evidence"})
   end
 
+  test "compression is requested, and a gzip response is decompressed before decoding" do
+    body = Jason.encode!(%{"id" => "cus_123", "object" => "customer"})
+
+    Req.Test.expect(Stripe.API, fn conn ->
+      assert ["gzip"] = Plug.Conn.get_req_header(conn, "accept-encoding")
+
+      conn
+      |> Plug.Conn.put_resp_header("content-encoding", "gzip")
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(200, :zlib.gzip(body))
+    end)
+
+    assert {:ok, %Stripe.Customer{id: "cus_123"}} = Stripe.Customer.retrieve("cus_123")
+  end
+
+  test "a redirect is surfaced rather than followed" do
+    Req.Test.stub(Stripe.API, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("location", "https://example.com/elsewhere")
+      |> Plug.Conn.send_resp(302, "")
+    end)
+
+    assert {:error, %Stripe.Error{extra: %{http_status: 302}}} =
+             Stripe.Customer.retrieve("cus_123")
+  end
+
   describe "retries" do
     test "a 429 is retried, reusing the same idempotency key" do
       put_retry_config(max_attempts: 1, base_backoff: 1, max_backoff: 1)

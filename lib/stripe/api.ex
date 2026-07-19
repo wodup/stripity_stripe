@@ -157,9 +157,9 @@ defmodule Stripe.API do
     Base.hex_encode32(binary, case: :lower, padding: false)
   end
 
-  # `Accept-Encoding` and `Connection` are deliberately not set here: Req
-  # negotiates (and transparently decodes) content encoding itself, and Finch
-  # owns connection reuse.
+  # `Accept-Encoding` and `Connection` are deliberately not set here: Req sets
+  # `Accept-Encoding` from the `:compressed` option in `build_req_options/1` and
+  # decompresses the response to match, and Finch owns connection reuse.
   @spec add_common_headers(headers) :: headers
   defp add_common_headers(existing_headers) do
     Map.merge(existing_headers, %{
@@ -238,15 +238,22 @@ defmodule Stripe.API do
   # Options every request is built with.
   #
   #   * `:decode_body` is disabled because responses are decoded with the
-  #     configured `json_library/0`, which callers may override.
+  #     configured `json_library/0`, which callers may override. Decompression
+  #     is a separate step and stays enabled.
   #   * `:retry` is disabled in favour of the library's own retry policy - see
   #     `should_retry?/3` and `backoff/2`.
+  #   * `:redirect` is disabled because the Stripe API does not redirect, and
+  #     following one silently would turn an anomalous response into an
+  #     apparently successful request. A 3xx surfaces as a `Stripe.Error`.
+  #   * `:compressed` is enabled so Req sets `Accept-Encoding` and decompresses
+  #     the response. It defaults to `false`, so without this responses would
+  #     come back uncompressed.
   #
   # Per-request options win over the `:req_options` config, which in turn wins
   # over these defaults.
   @spec build_req_options(list) :: Keyword.t()
   defp build_req_options(opts) do
-    [decode_body: false, retry: false]
+    [decode_body: false, retry: false, redirect: false, compressed: true]
     |> Keyword.merge(req_options())
     |> Keyword.merge(opts)
     |> add_finch_option()
