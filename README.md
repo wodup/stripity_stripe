@@ -89,11 +89,42 @@ config :stripity_stripe, json_library: Poison
 
 ### Timeout
 
-To set timeouts, pass opts for the http client. The default one is Hackney.
+Requests are made with [Req](https://hexdocs.pm/req). Any option Req accepts can
+be set under `:req_options`, which is merged into every request:
 
 ```ex
-config :stripity_stripe, hackney_opts: [{:connect_timeout, 1000}, {:recv_timeout, 5000}]
+config :stripity_stripe, req_options: [receive_timeout: 5000]
 ```
+
+Connection timeouts are configured on the library's own connection pool instead,
+since Req will not combine `:connect_options` with a supervised pool:
+
+```ex
+config :stripity_stripe, :pool_options, connect_timeout: 1000
+```
+
+### Testing
+
+Because requests go through Req, `Req.Test` can be used to stub Stripe in your
+own test suite - no HTTP server required:
+
+```ex
+# config/test.exs
+config :stripity_stripe, req_options: [plug: {Req.Test, Stripe.API}]
+```
+
+```ex
+test "creates a customer" do
+  Req.Test.expect(Stripe.API, fn conn ->
+    Req.Test.json(conn, %{"id" => "cus_123", "object" => "customer"})
+  end)
+
+  assert {:ok, %Stripe.Customer{id: "cus_123"}} = Stripe.Customer.create(%{})
+end
+```
+
+If Stripe is called from a process other than the test process, allow it with
+`Req.Test.allow/3`.
 
 ### Request Retries
 

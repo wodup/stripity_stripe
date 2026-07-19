@@ -103,66 +103,50 @@ defmodule Stripe.APITest do
   end
 
   test "oauth_request sets authorization header for deauthorize request" do
-    defmodule HackneyMock do
-      def request(_, _, headers, _, _) do
-        kv_headers =
-          headers
-          |> Enum.reduce(%{}, fn {k, v}, acc -> Map.put(acc, k, v) end)
+    # Echo the request headers back as the response body. OAuth requests go to
+    # connect.stripe.com rather than the mock server, so they are stubbed out.
+    Req.Test.stub(Stripe.API, fn conn ->
+      Req.Test.json(conn, Enum.into(conn.req_headers, %{}))
+    end)
 
-        {:ok, 200, headers, Jason.encode!(kv_headers)}
-      end
-    end
-
-    Application.put_env(:stripity_stripe, :http_module, HackneyMock)
+    put_req_options(plug: {Req.Test, Stripe.API})
 
     {:ok, body} = Stripe.API.oauth_request(:post, "deauthorize", %{})
-    assert body["Authorization"] == "Bearer sk_test_123"
+    assert body["authorization"] == "Bearer sk_test_123"
 
     {:ok, body} = Stripe.API.oauth_request(:post, "deauthorize", %{}, "1234")
-    assert body["Authorization"] == "Bearer 1234"
+    assert body["authorization"] == "Bearer 1234"
 
     {:ok, body} = Stripe.API.oauth_request(:post, "token", %{})
-    assert Map.keys(body) |> Enum.member?("Authorization") == false
+    refute Map.has_key?(body, "authorization")
   end
 
-  @tag :wip
-  test "reads hackney timeout opts from config" do
-    # Return request opts as response body
-    defmodule HackneyMock do
-      def request(_, _, headers, _, opts) do
-        kv_opts =
-          opts
-          |> Enum.reduce(%{}, fn opt, acc ->
-            case opt do
-              {k, v} ->
-                Map.put(acc, k, v)
+  describe "req_options config" do
+    test "is not applied when unset" do
+      Stripe.API.request(%{}, :get, "products", %{}, [])
 
-              _ ->
-                Map.put(acc, opt, opt)
-            end
-          end)
-
-        {:ok, 200, headers, Jason.encode!(kv_opts)}
-      end
+      assert_received({_method, _url, _headers, _body, opts})
+      refute Map.has_key?(opts, :receive_timeout)
+      refute Map.has_key?(opts, :connect_options)
     end
 
-    Application.put_env(:stripity_stripe, :http_module, HackneyMock)
+    test "is passed through to Req" do
+      put_req_options(receive_timeout: 5_000, connect_options: [timeout: 1_000])
 
-    {:ok, request_opts} = Stripe.API.request(%{}, :get, "/", %{}, [])
-    refute Map.has_key?(request_opts, "connect_timeout")
-    refute Map.has_key?(request_opts, "recv_timeout")
+      Stripe.API.request(%{}, :get, "products", %{}, [])
 
-    Application.put_env(:stripity_stripe, :hackney_opts, [
-      {:connect_timeout, 1000},
-      {:recv_timeout, 5000}
-    ])
+      assert_received({_method, _url, _headers, _body, opts})
+      assert opts[:receive_timeout] == 5_000
+      assert opts[:connect_options] == [timeout: 1_000]
+    end
 
-    {:ok, request_opts} = Stripe.API.oauth_request(:post, "token", %{})
-    assert request_opts["connect_timeout"] == 1000
-    assert request_opts["recv_timeout"] == 5000
+    test "is overridden by per-request options" do
+      put_req_options(receive_timeout: 5_000)
 
-    {:ok, request_opts} = Stripe.API.request(%{}, :get, "/", %{}, [])
-    assert request_opts["connect_timeout"] == 1000
-    assert request_opts["recv_timeout"] == 5000
+      Stripe.API.request(%{}, :get, "products", %{}, receive_timeout: 250)
+
+      assert_received({_method, _url, _headers, _body, opts})
+      assert opts[:receive_timeout] == 250
+    end
   end
 end
