@@ -97,10 +97,14 @@ config :stripity_stripe, req_options: [receive_timeout: 5000]
 ```
 
 Connection timeouts are configured on the library's own connection pool instead,
-since Req will not combine `:connect_options` with a supervised pool:
+since Req will not combine `:connect_options` with a supervised pool. The
+`:pool_options` key is passed to `Finch` verbatim:
 
 ```ex
-config :stripity_stripe, :pool_options, connect_timeout: 1000
+config :stripity_stripe, :pool_options,
+  size: 10,
+  conn_max_idle_time: 5_000,
+  conn_opts: [transport_opts: [timeout: 1_000]]
 ```
 
 ### Testing

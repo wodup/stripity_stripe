@@ -155,26 +155,33 @@ defmodule Stripe.APITest do
   end
 
   describe "pool_options config" do
-    test "maps to the Finch equivalents" do
-      put_env(:pool_options, timeout: 15_000, max_connections: 25, connect_timeout: 3_000)
+    test "is handed to Finch verbatim" do
+      pool_options = [
+        size: 25,
+        conn_max_idle_time: 15_000,
+        conn_opts: [transport_opts: [timeout: 3_000]]
+      ]
+
+      put_env(:pool_options, pool_options)
+
+      assert [{Finch, finch_opts}] = Stripe.API.supervisor_children()
+      assert finch_opts[:pools][:default] == pool_options
+    end
+
+    test "passes through options the library knows nothing about" do
+      put_env(:pool_options, size: 10, protocols: [:http2], start_pool_metrics?: true)
 
       assert [{Finch, finch_opts}] = Stripe.API.supervisor_children()
       pool = finch_opts[:pools][:default]
 
-      assert pool[:size] == 25
-      assert pool[:conn_opts] == [transport_opts: [timeout: 3_000]]
-
-      # `:timeout` is a per-connection idle timeout, so it must not be mapped to
-      # `:pool_max_idle_time`, which terminates the whole pool.
-      assert pool[:conn_max_idle_time] == 15_000
-      refute Keyword.has_key?(pool, :pool_max_idle_time)
+      assert pool[:protocols] == [:http2]
+      assert pool[:start_pool_metrics?] == true
     end
 
-    test "omits conn_opts when no connect timeout is configured" do
-      put_env(:pool_options, timeout: 5_000, max_connections: 10)
+    test "starts no pool when pooling is disabled" do
+      put_env(:use_connection_pool, false)
 
-      assert [{Finch, finch_opts}] = Stripe.API.supervisor_children()
-      refute Keyword.has_key?(finch_opts[:pools][:default], :conn_opts)
+      assert Stripe.API.supervisor_children() == []
     end
   end
 

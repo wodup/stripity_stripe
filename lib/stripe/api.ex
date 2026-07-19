@@ -43,41 +43,11 @@ defmodule Stripe.API do
     end
   end
 
-  # Translates the library's historical (hackney-derived) `:pool_options` into
-  # their Finch equivalents:
-  #
-  #   * `:max_connections`  – connections held per origin -> Finch's `:size`
-  #   * `:timeout`          – how long an idle connection is kept before being
-  #                           closed -> Finch's `:conn_max_idle_time`
-  #   * `:connect_timeout`  – how long to wait when establishing a connection
-  #                           -> Finch's `:conn_opts`
-  #
-  # `:timeout` maps to `:conn_max_idle_time` rather than `:pool_max_idle_time`:
-  # the former closes an individual connection that has sat idle too long, which
-  # is what hackney's pool timeout did and what keeps a stale keep-alive socket
-  # from being handed out. The latter terminates the whole pool, which Finch
-  # warns causes pool restarts at low values.
+  # `:pool_options` is handed to Finch verbatim, so every option Finch supports
+  # is reachable and its documentation is the reference.
   @spec finch_pool_options() :: Keyword.t()
   defp finch_pool_options() do
-    opts = get_pool_options() || []
-
-    [
-      size: Keyword.get(opts, :max_connections, 10),
-      conn_max_idle_time: Keyword.get(opts, :timeout, 5_000)
-    ]
-    |> put_conn_opts(Keyword.get(opts, :connect_timeout))
-  end
-
-  @spec put_conn_opts(Keyword.t(), non_neg_integer | nil) :: Keyword.t()
-  defp put_conn_opts(pool_options, nil), do: pool_options
-
-  defp put_conn_opts(pool_options, connect_timeout) do
-    Keyword.put(pool_options, :conn_opts, transport_opts: [timeout: connect_timeout])
-  end
-
-  @spec get_pool_options() :: Keyword.t()
-  defp get_pool_options() do
-    Config.resolve(:pool_options)
+    Config.resolve(:pool_options) || []
   end
 
   @spec get_base_url() :: String.t()
