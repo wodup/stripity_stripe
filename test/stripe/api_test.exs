@@ -154,6 +154,30 @@ defmodule Stripe.APITest do
     refute Map.has_key?(body, "authorization")
   end
 
+  describe "pool_options config" do
+    test "maps to the Finch equivalents" do
+      put_env(:pool_options, timeout: 15_000, max_connections: 25, connect_timeout: 3_000)
+
+      assert [{Finch, finch_opts}] = Stripe.API.supervisor_children()
+      pool = finch_opts[:pools][:default]
+
+      assert pool[:size] == 25
+      assert pool[:conn_opts] == [transport_opts: [timeout: 3_000]]
+
+      # `:timeout` is a per-connection idle timeout, so it must not be mapped to
+      # `:pool_max_idle_time`, which terminates the whole pool.
+      assert pool[:conn_max_idle_time] == 15_000
+      refute Keyword.has_key?(pool, :pool_max_idle_time)
+    end
+
+    test "omits conn_opts when no connect timeout is configured" do
+      put_env(:pool_options, timeout: 5_000, max_connections: 10)
+
+      assert [{Finch, finch_opts}] = Stripe.API.supervisor_children()
+      refute Keyword.has_key?(finch_opts[:pools][:default], :conn_opts)
+    end
+  end
+
   describe "req_options config" do
     test "is not applied when unset" do
       Stripe.API.request(%{}, :get, "products", %{}, [])

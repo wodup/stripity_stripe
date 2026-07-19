@@ -48,17 +48,22 @@ defmodule Stripe.API do
   #
   #   * `:max_connections`  – connections held per origin -> Finch's `:size`
   #   * `:timeout`          – how long an idle connection is kept before being
-  #                           closed -> Finch's `:pool_max_idle_time`
+  #                           closed -> Finch's `:conn_max_idle_time`
   #   * `:connect_timeout`  – how long to wait when establishing a connection
   #                           -> Finch's `:conn_opts`
   #
+  # `:timeout` maps to `:conn_max_idle_time` rather than `:pool_max_idle_time`:
+  # the former closes an individual connection that has sat idle too long, which
+  # is what hackney's pool timeout did and what keeps a stale keep-alive socket
+  # from being handed out. The latter terminates the whole pool, which Finch
+  # warns causes pool restarts at low values.
   @spec finch_pool_options() :: Keyword.t()
   defp finch_pool_options() do
     opts = get_pool_options() || []
 
     [
       size: Keyword.get(opts, :max_connections, 10),
-      pool_max_idle_time: Keyword.get(opts, :timeout, 5_000)
+      conn_max_idle_time: Keyword.get(opts, :timeout, 5_000)
     ]
     |> put_conn_opts(Keyword.get(opts, :connect_timeout))
   end
@@ -562,16 +567,17 @@ defmodule Stripe.API do
   # variety of other connection failures. This could occur from a single
   # saturated server, so retry in case it's intermittent.
   defp retry_response?({:error, :econnrefused}), do: true
-  # A pooled keep-alive connection that the peer closed after the pool handed
-  # it out but before the request was written. hackney cannot check the socket
-  # and send atomically, so it answers with an error instead of an exit
-  # precisely so the caller can retry on a fresh connection. The request never
-  # reached Stripe.
+  # A hackney-era atom for a pooled keep-alive connection that the peer closed
+  # after the pool handed it out but before the request was written. Mint
+  # reports that case as `:closed` below, so this is unreachable now; it is kept
+  # because the policy costs nothing as a superset and the atom is unambiguous.
   defp retry_response?({:error, :invalid_state}), do: true
-  # The same stale connection one step later: the request went out but the
-  # socket closed before the response came back. Whether Stripe processed it is
+  # The same stale connection, reported by Mint as `:closed`. Either the pool
+  # handed out a socket the peer had already closed, or the request went out and
+  # the socket died before the response came back. Whether Stripe processed it is
   # unknowable from here, so this relies on the idempotency key, which is built
-  # once per request and reused across attempts.
+  # once per request and reused across attempts. `:conn_max_idle_time` in
+  # `finch_pool_options/0` is what keeps this rare.
   defp retry_response?({:error, :closed}), do: true
   # Retry on timeout-related problems (either on open or read).
   defp retry_response?({:error, :connect_timeout}), do: true
